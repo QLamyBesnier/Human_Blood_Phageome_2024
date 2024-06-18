@@ -1276,7 +1276,7 @@ fit_feces = Maaslin2(input_data = feces_df,
 fit_feces$results[fit_feces$results$qval < 0.25,]
 ```
 
-Differential analysis for blood samples. This recreates Figure 5.
+Differential analysis for blood samples. This recreates Figure 5:
 
 ```{r DA blood, message=FALSE, warning=FALSE}
 blood_df = data.frame(t(otu_table(blood)))
