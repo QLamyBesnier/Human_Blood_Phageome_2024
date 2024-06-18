@@ -14,7 +14,7 @@ It is composed of 3 files:
 - *HBP_tax.csv*: table containing all the data corresponding to each OTU.
 - *HBP_metadata.csv*: table containing all the metadata corresponding to each samples
 
-Those 3 files are required to the reproduce the analysis presented in the manuscript.
+The 3 files are required to the reproduce the analysis presented in the manuscript.
 
 ### Code
 
