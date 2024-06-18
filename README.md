@@ -24,6 +24,6 @@ It is composed of a single RMarkdown file which generates all the figures corres
 
 ### Issues
 
-Feel free to report any code-related issue or question in the corresponding [Issues](https://github.com/QLamyBesnier/Human_Blood_Phageome_2024) section of the GitHub repository or by emailing the corresponding authors of the manuscript.
+Feel free to report any code-related issue or question in the corresponding section of the GitHub repository or by emailing the corresponding authors of the manuscript.
 
 
