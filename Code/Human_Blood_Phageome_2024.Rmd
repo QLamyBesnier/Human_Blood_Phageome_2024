@@ -1,0 +1,1315 @@
+---
+title: "The human blood harbors a phageome which differs in Crohn’s disease"
+author: "Quentin Lamy-Besnier"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_caption: yes
+    number_sections: yes
+    theme: united
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Analysis of Lamy-Besnier et al. 2024: The human blood harbors a phageome which differs in Crohn’s disease. 
+
+See https://github.com/QLamyBesnier/Human_Blood_Phageome_2024 for more information.
+
+# Set-up
+
+## Packages
+
+Load the required packages:
+
+```{r Packages, message=FALSE, warning=FALSE}
+library(phyloseq) # for phyloseq
+library(ggplot2) # for ggplot2 graphs
+library(tibble) # for "column_to_rownames"
+library(ggpubr) # for stats on ggplots
+library(DT) # for interactive datatables
+library(ggvenn) # for venn diagrams
+library(scales) # for log transformations
+library(vegan) # for the ecological analysis
+library(rstatix) # for the kruskal-wallis test
+library(reshape2) # for melting data frames
+library(pheatmap) # for heatmaps
+library(UpSetR) # for upset graphs
+library(gtools) # for smart sorting
+library(Maaslin2) # for differential analysis
+```
+
+## Data preparation
+
+Load all the necessary data:
+
+```{r Data loading, message=FALSE, warning=FALSE}
+abundance_mat = read.table("HBP_counts.csv", header = TRUE, sep = "\t")
+tax_mat = read.table("HBP_tax.csv", header = TRUE, sep = ",")
+sample_mat = read.csv("HBP_metadata.csv", header = TRUE, sep = ";")
+```
+
+Create a Phyloseq object with this data:
+
+```{r Phyloseq object, message=FALSE, warning=FALSE}
+# transforming the matrices for phyloseq integration
+abundance_mat <- column_to_rownames(abundance_mat, "X")
+tax_mat <- column_to_rownames(tax_mat, "X")
+sample_mat <- column_to_rownames(sample_mat, "X")
+abundance_mat <- as.matrix(abundance_mat)
+tax_mat <- as.matrix(tax_mat)
+abundance = otu_table(abundance_mat, taxa_are_rows = TRUE)
+ab_all <- phyloseq(abundance, tax_table(tax_mat), sample_data(sample_mat))
+keep <- rownames(sample_data(ab_all))[!rownames(sample_data(ab_all)) %in% c("CD7_B", "H13_B", "H7_F", "H10_F")]
+ab <- prune_samples(keep, ab_all)
+ab
+```
+
+# vOTU characterisation 
+
+Quality of vOTUs. This recreates Figure S2A:
+
+```{r Quality, message=FALSE, warning=FALSE}
+tax_df <- data.frame(tax_mat)
+viral_df <- tax_df[tax_df$Viral == "Yes",]
+quality_df <- data.frame((table(viral_df[, "Quality"])/17454)*100)
+quality_df$Var1 <- factor(quality_df$Var1, levels = c("Complete", "High-quality", "Medium-quality", "Low-quality", "Not-determined"))
+
+ggplot(quality_df, aes(x = "", y = Freq, fill = Var1)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", width = 0.5) +
+  labs(title = "", x = NULL, y = "Percentage", fill = "CheckV Quality") +
+  theme_classic() +
+  scale_fill_brewer(palette = "YlGn", direction = -1) +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black"))
+```
+
+Length of vOTUs. This recreates Figure S2B:
+
+```{r Size, message=FALSE, warning=FALSE}
+viral_df$LengthKbp <- as.numeric(viral_df$Length)/1000
+
+ggplot() +
+  geom_density(data = viral_df, aes(x = LengthKbp), fill = "#9AC8EB", alpha = 0.4) +
+  labs(x = "Contig Length (kbp)", y = "Density") +
+  scale_x_log10() +
+  theme_classic() + 
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black"))
+```
+
+# Negative control samples analysis
+
+## Composition
+
+Comparison between the contigs found in both negative controls. This recreates Figure 1D:
+
+```{r NegControl Venn, message=FALSE, warning=FALSE}
+negcontrol <- subset_samples(ab, Disease == "Control")
+otu_neg2 <- otu_table(negcontrol)[,"Microtube"]
+neg2_names <- rownames(otu_neg2)[otu_neg2 > 0]
+otu_neg3 <- otu_table(negcontrol)[,"BloodCollectionTube"]
+neg3_names <- rownames(otu_neg3)[otu_neg3 > 0]
+neg2_neg3_names <- list("Microtube" = neg2_names, "BloodCollectionTube" = neg3_names)
+
+ggvenn(neg2_neg3_names, fill_color = c("cornflowerblue", "indianred"), text_size = 10, show_percentage = FALSE)
+```
+
+Composition of the negative control samples, at the superkingdom level. This recreates Figure S4A:
+
+```{r NegControl all, message=FALSE, warning=FALSE}
+negcontrol_only <- subset_taxa(negcontrol, Contaminant == "Yes")
+otu_table(negcontrol_only) <- otu_table(negcontrol_only) / as.numeric(tax_table(negcontrol_only)[,"Length"])
+negcontrol_only <- transform_sample_counts(negcontrol_only, function(x) x / sum(x))
+negcontrol_nonviral <- subset_taxa(negcontrol_only, Viral == "No")
+tax_nonviral <- as.data.frame(tax_table(negcontrol_nonviral))
+tax_nonviral[is.na(tax_nonviral)] <- "NA"
+
+# sum of the abundances per taxon for the eppendorf tube
+neg2_names_nonviral <- rownames(tax_table(negcontrol_nonviral)[rownames(tax_table(negcontrol_nonviral)) %in% neg2_names,])
+superking_ab_2 <- data.frame("Superkingdom" = tax_table(negcontrol_nonviral)[neg2_names_nonviral, "CATSuperkingdom"], "Abundance" = otu_table(negcontrol_nonviral)[neg2_names_nonviral, "Microtube"]); colnames(superking_ab_2)[1] = "Superkingdom"
+# change the "NA" category as a character so NA is counted in the following aggregating step
+superking_ab_2$Superkingdom[is.na(superking_ab_2$Superkingdom)] <- "NA"
+sum_superking_ab_2 <- aggregate(Microtube ~ Superkingdom, superking_ab_2, sum)
+
+# sum of the abundances per taxon for the blood tube
+neg3_names_nonviral <- rownames(tax_table(negcontrol_nonviral)[rownames(tax_table(negcontrol_nonviral)) %in% neg3_names,])
+superking_ab_3 <- data.frame("Superkingdom" = tax_table(negcontrol_nonviral)[neg3_names_nonviral, "CATSuperkingdom"], "Abundance" = otu_table(negcontrol_nonviral)[neg3_names_nonviral, "BloodCollectionTube"]); colnames(superking_ab_3)[1] = "Superkingdom"
+superking_ab_3$Superkingdom[is.na(superking_ab_3$Superkingdom)] <- "NA"
+sum_superking_ab_3 <- aggregate(BloodCollectionTube ~ Superkingdom, superking_ab_3, sum)
+
+# grouping all the sample in one dataframe
+superking_ab <- data.frame(Superkingdom = sum_superking_ab_2[,1], Microtube = sum_superking_ab_2[,2], BloodCollectionTube = sum_superking_ab_3[,2])
+superking_ab$Superkingdom <- factor(c("Archaea", "Bacteria", "Eukaryota", "Unknown", "Virus"), levels = c("Virus", "Bacteria", "Eukaryota", "Archaea", "Unknown"))
+superking_ab <- rbind(superking_ab[-5,], c("Virus", as.numeric(1-colSums(superking_ab[, -1]))))
+superking_ab_melt <- melt(superking_ab, id.vars = "Superkingdom", variable.name = "Tube")
+superking_ab_melt$value <- as.numeric(superking_ab_melt$value)
+
+ggplot(superking_ab_melt, aes(x = Tube, y = value, fill = Superkingdom)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  labs(title = "", x = "", y = "Relative abundance") +
+  scale_fill_manual(values = c("Virus" = "#FFD43B", "Bacteria" = "#F8766D", "Eukaryota" = "#00BA38", "Archaea" = "#00BFC4", "Unknown" = "grey")) +
+  theme_classic() +
+  theme(legend.position = "right", text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(fill = guide_legend(title = NULL))
+```
+
+Eukaryotic composition of the negative control samples, at the phylum level. This recreates Figure S4B:
+
+```{r NegControl eukaryotic, message=FALSE, warning=FALSE}
+euk_df <- tax_nonviral[tax_nonviral$CATSuperkingdom == "Eukaryota",]
+# sum of the abundances per taxon for the eppendorf tube
+neg2_names_euk <- rownames(euk_df)[rownames(euk_df) %in% neg2_names]
+euk_ab_2 <- data.frame("Phylum" = tax_table(negcontrol_nonviral)[neg2_names_euk, "CATPhylum"], "Abundance" = otu_table(negcontrol_nonviral)[neg2_names_euk, "Microtube"]); colnames(euk_ab_2)[1] = "Phylum"
+# change the "NA" category as a character so NA is counted in the following aggregating step
+euk_ab_2$Phylum[is.na(euk_ab_2$Phylum)] <- "Unknown"
+sum_euk_ab_2 <- aggregate(Microtube ~ Phylum, euk_ab_2, sum)
+euk_ab_2_final <- sum_euk_ab_2 %>% mutate(across(starts_with(c("Microtube")), ~ (. / sum(.))))
+
+# sum of the abundances per taxon for the blood tube
+neg3_names_euk <- rownames(euk_df)[rownames(euk_df) %in% neg3_names]
+euk_ab_3 <- data.frame("Phylum" = tax_table(negcontrol_nonviral)[neg3_names_euk, "CATPhylum"], "Abundance" = otu_table(negcontrol_nonviral)[neg3_names_euk, "BloodCollectionTube"]); colnames(euk_ab_3)[1] = "Phylum"
+euk_ab_3$Phylum[is.na(euk_ab_3$Phylum)] <- "Unknown"
+sum_euk_ab_3 <- aggregate(BloodCollectionTube ~ Phylum, euk_ab_3, sum)
+euk_ab_3_final <- sum_euk_ab_3 %>% mutate(across(starts_with(c("BloodCollectionTube")), ~ (. / sum(.))))
+
+# grouping all the sample in one dataframe
+euk_ab <- merge(euk_ab_2_final, euk_ab_3_final, by = "Phylum", all = TRUE)
+euk_ab[is.na(euk_ab)] <- 0
+colnames(euk_ab)[2:3] = c("Eppendorf", "BloodTube")
+euk_ab$Phylum <- factor(euk_ab$Phylum, levels = c("Ascomycota", "Chordata", "Nematoda", "Basidiomycota", "Streptophyta", "Unknown"))
+euk_ab_melt <- melt(euk_ab, variable.name = "Tube")
+
+ggplot(euk_ab_melt, aes(x = Tube, y = value, fill = Phylum)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  labs(title = "", x = "", y = "Relative abundance", fill = "Phylum") +
+  theme_classic() +
+  theme(legend.position = "right", text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_fill_manual(values = c("Ascomycota" = "#FFD43B", "Chordata" = "#00BA38", "Nematoda" = "#0033CC", "Basidiomycota" = "#F8766D", "Streptophyta" = "#00B3A7", "Unknown" = "grey"))
+```
+
+Bacterial composition of the negative control samples, at the phylum level. This recreates Figure S4C:
+
+```{r NegControl bacterial, message=FALSE, warning=FALSE}
+bac_df <- tax_nonviral[tax_nonviral$CATSuperkingdom == "Bacteria",]
+neg2_names_bac <- rownames(bac_df)[rownames(bac_df) %in% neg2_names]
+bac_ab_2 <- data.frame("Phylum" = tax_table(negcontrol_nonviral)[neg2_names_bac, "CATPhylum"], "Abundance" = otu_table(negcontrol_nonviral)[neg2_names_bac, "Microtube"]); colnames(bac_ab_2)[1] = "Phylum"
+bac_ab_2$Phylum[is.na(bac_ab_2$Phylum)] <- "Unknown"
+sum_bac_ab_2 <- aggregate(Microtube ~ Phylum, bac_ab_2, sum)
+bac_ab_2_final <- sum_bac_ab_2 %>% mutate(across(starts_with(c("Microtube")), ~ (. / sum(.))))
+neg3_names_bac <- rownames(bac_df)[rownames(bac_df) %in% neg3_names]
+bac_ab_3 <- data.frame("Phylum" = tax_table(negcontrol_nonviral)[neg3_names_bac, "CATPhylum"], "Abundance" = otu_table(negcontrol_nonviral)[neg3_names_bac, "BloodCollectionTube"]); colnames(bac_ab_3)[1] = "Phylum"
+bac_ab_3$Phylum[is.na(bac_ab_3$Phylum)] <- "Unknown"
+sum_bac_ab_3 <- aggregate(BloodCollectionTube ~ Phylum, bac_ab_3, sum)
+bac_ab_3_final <- sum_bac_ab_3 %>% mutate(across(starts_with(c("BloodCollectionTube")), ~ (. / sum(.))))
+bac_ab <- merge(bac_ab_2_final, bac_ab_3_final, by = "Phylum", all = TRUE)
+colnames(bac_ab)[2:3] <- c("Microtube", "Blood\nSampling Tube")
+bac_ab[is.na(bac_ab)] <- 0
+bac_ab <- rbind(
+  bac_ab[!bac_ab$Phylum %in% c("Candidatus Melainabacteria", "Cyanobacteria", "Deinococcus-Thermus"), ],
+  c("Other (3 Phyla)", colSums(bac_ab[bac_ab$Phylum %in% c("Candidatus Melainabacteria", "Cyanobacteria", "Deinococcus-Thermus"), 2:3])))
+bac_ab$Phylum <- factor(bac_ab$Phylum, levels = c("Actinomycetota", "Bacteroidota", "Bacillota", "Pseudomonadota", "Other (3 Phyla)", "Unknown"))
+bac_ab_melt <- melt(bac_ab, id.vars = "Phylum", variable.name = "Tube")
+bac_ab_melt$value <- as.numeric(bac_ab_melt$value)
+
+ggplot(bac_ab_melt, aes(x = Tube, y = value, fill = Phylum)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  labs(title = "", x = "", y = "Relative abundance", fill = "Phylum") +
+  theme_classic() +
+  theme(legend.position = "right", text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_fill_manual(values = c("Actinomycetota" = "#FFD43B", "Bacteroidota" = "#F8766D", "Bacillota" = "#00BA38", "Pseudomonadota" = "#00BFC4", "Other (3 Phyla)" = "#C77CFF", "Unknown" = "grey"))
+```
+
+Viral composition of the negative control samples, by looking at the host phylum. This recreates Figure S4D:
+
+```{r NegControl viral, message=FALSE, warning=FALSE}
+negcontrol_viral <- subset_taxa(negcontrol_only, Viral == "Yes")
+tax_viral <- as.data.frame(tax_table(negcontrol_viral))
+tax_viral[is.na(tax_viral)] <- "NA"
+neg2_names_viral <- rownames(tax_viral)[rownames(tax_viral) %in% neg2_names]
+neg3_names_viral <- rownames(tax_viral)[rownames(tax_viral) %in% neg3_names]
+hostphylum_ab_2 <- data.frame("HostPhylum" = tax_table(negcontrol_viral)[neg2_names_viral, "HostPhylum"], "Abundance" = otu_table(negcontrol_viral)[neg2_names_viral, "Microtube"]); colnames(hostphylum_ab_2)[1] = "HostPhylum"
+hostphylum_ab_2$HostPhylum[is.na(hostphylum_ab_2$HostPhylum)] <- "Unknown"
+sum_hostphylum_ab_2 <- aggregate(Microtube ~ HostPhylum, hostphylum_ab_2, sum)
+hostphylum_ab_2_final <- sum_hostphylum_ab_2 %>% mutate(across(starts_with(c("Microtube")), ~ (. / sum(.))))
+hostphylum_ab_3 <- data.frame("HostPhylum" = tax_table(negcontrol_viral)[neg3_names_viral, "HostPhylum"], "Abundance" = otu_table(negcontrol_viral)[neg3_names_viral, "BloodCollectionTube"]); colnames(hostphylum_ab_3)[1] = "HostPhylum"
+hostphylum_ab_3$HostPhylum[is.na(hostphylum_ab_3$HostPhylum)] <- "Unknown"
+sum_hostphylum_ab_3 <- aggregate(BloodCollectionTube ~ HostPhylum, hostphylum_ab_3, sum)
+hostphylum_ab_3_final <- sum_hostphylum_ab_3 %>% mutate(across(starts_with(c("BloodCollectionTube")), ~ (. / sum(.))))
+hostphylum_ab <- merge(hostphylum_ab_2_final, hostphylum_ab_3_final, by = "HostPhylum", all = TRUE)
+hostphylum_ab[is.na(hostphylum_ab)] <- 0
+colnames(hostphylum_ab)[2:3] <- c("Microtube", "Blood\nSampling Tube")
+hostphylum_ab <- rbind(
+  hostphylum_ab[!hostphylum_ab$HostPhylum %in% c("Acidobacteriota", "Cyanobacteria", "Verrucomicrobiota"), ],
+  c("Other (3 Phyla)", colSums(hostphylum_ab[hostphylum_ab$HostPhylum %in% c("Acidobacteriota", "Cyanobacteria", "Verrucomicrobiota"), 2:3])))
+hostphylum_ab$HostPhylum <- factor(hostphylum_ab$HostPhylum, levels = c("Actinomycetota", "Bacteroidota", "Bacillota", "Pseudomonadota", "Other (3 Phyla)", "Unknown"))
+hostphylum_ab_melt <- melt(hostphylum_ab, id.vars = "HostPhylum", variable.name = "Tube")
+hostphylum_ab_melt$value <- as.numeric(hostphylum_ab_melt$value)
+
+ggplot(hostphylum_ab_melt, aes(x = Tube, y = value, fill = HostPhylum)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  labs(title = "", x = "", y = "Relative abundance", fill = "Host Phylum") +
+  theme_classic() +
+  theme(legend.position = "right", text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_fill_manual(values = c("Actinomycetota" = "#FFD43B", "Bacteroidota" = "#F8766D", "Bacillota" = "#00BA38", "Pseudomonadota" = "#00BFC4", "Other (3 Phyla)" = "#C77CFF", "Unknown" = "grey"))
+```
+
+## Contamination accross samples
+
+Heatmap of the presence of contaminant OTUs across the blood samples. This recreates the left pannel of Figure S5:
+
+```{r Contamination heatmap, message=FALSE, warning=FALSE}
+contam_only <- subset_taxa(ab, Contaminant == "Yes")
+contam_only_blood <- subset_samples(contam_only, SampleType == "Plasma")
+otu_contam_blood <- data.frame(otu_table(contam_only_blood))
+otu_contam_blood[otu_contam_blood > 0] <- 1
+order <- order(rowSums(otu_contam_blood), decreasing = TRUE)
+ab_contam <- phyloseq(abundance, tax_table(tax_mat), sample_data(sample_mat))
+sample_names(ab_contam)[1] <- "BloodCollectionTube"
+sample_names(ab_contam)[2] <- "Microtube"
+negcontrol <- subset_samples(ab_contam, Disease == "Control")
+otu_neg2 <- otu_table(negcontrol)[,"Microtube"]
+neg2_names <- rownames(otu_neg2)[otu_neg2 > 0]
+otu_neg3 <- otu_table(negcontrol)[,"BloodCollectionTube"]
+neg3_names <- rownames(otu_neg3)[otu_neg3 > 0]
+common23 <- intersect(neg2_names, neg3_names)
+contam_tube <- character(nrow(otu_contam_blood))
+contam_tube[rownames(otu_contam_blood) %in% neg2_names] <- "Microtube"
+contam_tube[rownames(otu_contam_blood) %in% neg3_names] <- "BloodCollectionTube"
+contam_tube[rownames(otu_contam_blood) %in% common23] <- "Shared"
+contam_tube_df <- data.frame("Origin" = contam_tube, row.names = rownames(otu_contam_blood))
+decreasing_reads_number <- c("CD3_B", "CD4_B", "CD5_B", "CD2_B", "CD1_B", "H1_B", "H3_B", "H5_B", "H2_B", "CD15_B", "CD12_B", "CD8_B", "H4_B", "CD10_B", "CD9_B", "CD11_B", "H14_B", "CD13_B", "CD14_B", "CD6_B", "H7_B", "H8_B", "H9_B", "H12_B", "H10_B", "H6_B", "H11_B")
+reads_df <- data.frame("Number_of_Reads" = c(14833794, 11955938, 10236927, 8720837, 8696199, 6790645, 6122420, 5840315, 5336467,4380873, 4117958, 3434820, 3433116, 3338429, 3293988, 2778364, 2713132, 2207758, 2052908, 1917021, 837299, 788996, 723438, 691480, 573092, 185563, 160240), row.names = decreasing_reads_number)
+ylorrd_palette <- colorRampPalette(RColorBrewer::brewer.pal(9, "YlOrRd"))
+colors <- list("Origin" = c("BloodCollectionTube" = "indianred", "Microtube" = "cornflowerblue", "Shared" = "darkseagreen"), "Number_of_Reads" = ylorrd_palette(length(unique(reads_df$Number_of_Reads))))
+
+pheatmap(otu_contam_blood[order, decreasing_reads_number],
+         color = c("black","orange"),
+         cluster_cols = FALSE,
+         clustering_distance_cols = "euclidean",
+         cluster_rows = FALSE,
+         legend_breaks = c(0, 1),     
+         legend_labels = c("Absent", "Present"),
+         show_rownames = FALSE,
+         annotation_row = contam_tube_df,
+         annotation_col = reads_df,
+         annotation_colors = colors)
+```
+
+Zoom on the previous heatmap with only the first 500 (most-shared) OTUs. This recreates the right pannel of Figure S5:
+
+```{r Contamination heatmap zoom, message=FALSE, warning=FALSE}
+pheatmap(otu_contam_blood[order[1:500], decreasing_reads_number],
+         color = c("black","orange"),
+         cluster_cols = FALSE,
+         clustering_distance_cols = "euclidean",
+         cluster_rows = FALSE,
+         legend_breaks = c(0, 1),     
+         legend_labels = c("Absent", "Present"),
+         show_rownames = FALSE,
+         annotation_row = contam_tube_df,
+         annotation_col = reads_df,
+         annotation_colors = colors)
+```
+
+# Analysis of the non-viral OTUs
+
+Composition of the non-contaminant, non-viral OTUs, at the superkingdom level. This recreates Figure S6A:
+
+```{r Non-viral all, message=FALSE, warning=FALSE}
+no_negcontrol <- subset_samples(ab, Disease != "Control")
+no_contam <- subset_taxa(no_negcontrol, Contaminant == "No")
+non_viral_only <- subset_taxa(no_contam, Viral == "No")
+otu_table(non_viral_only) <- otu_table(non_viral_only) / as.numeric(tax_table(non_viral_only)[,"Length"])
+non_viral_only <- transform_sample_counts(non_viral_only, function(x) x / sum(x))
+tax_nonviral <- as.data.frame(tax_table(non_viral_only))
+tax_nonviral[is.na(tax_nonviral)] <- "NA"
+non_viral_only <- speedyseq::relocate_tax_table(non_viral_only, "CATSuperkingdom")
+superkingdom_glom <- speedyseq::tax_glom(non_viral_only, "CATSuperkingdom")
+superkingdom_na <- rownames(tax_nonviral[tax_nonviral$CATSuperkingdom == "NA",])
+superkingdom_na_ab <- colSums(otu_table(non_viral_only)[rownames(otu_table(non_viral_only)) %in% superkingdom_na])
+superkingdom_ab_df <- rbind(as.data.frame(otu_table(superkingdom_glom)), superkingdom_na_ab)
+rownames(superkingdom_ab_df) <- c("Bacteria", "Eukaryota", "Virus", "Archaea", "Unknown")
+superkingdom_ab_melt <- melt(as.matrix(superkingdom_ab_df))
+superkingdom_ab_melt <- cbind(superkingdom_ab_melt, "SampleType" = c(rep("Blood", 135), rep("Feces", 135)), "Disease" = c(rep("CD", 45), rep("Healthy", 65), rep("CD", 25), rep("CD", 50), rep("Healthy", 60), rep("CD", 25)))
+superkingdom_ab_melt$Var1 <- factor(superkingdom_ab_melt$Var1, levels = c("Archaea", "Bacteria", "Eukaryota", "Virus", "Unknown"))
+average_superkingdom_ab <- aggregate(value ~ Var1 + SampleType, data = superkingdom_ab_melt, FUN = mean)
+
+ggplot(average_superkingdom_ab, aes(x = SampleType, y = value, fill = Var1)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  labs(title = "", x = "", y = "Relative abundance", fill = "") +
+  theme_classic() +
+  theme(legend.position = "right", text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_fill_manual(values = c("Archaea" = "#00B3A7", "Bacteria" = "#F8766D", "Eukaryota" = "#00BA38", "Virus" = "#FFD43B", "Unknown" = "grey"))
+```
+
+Composition of the eukaryotic non-contaminant, non-viral OTUs, at the superkingdom level. This recreates Figure S6B:
+
+```{r Non-viral eukaryotic, message=FALSE, warning=FALSE}
+euk <- subset_taxa(non_viral_only, CATSuperkingdom == "Eukaryota")
+euk <- subset_samples(euk, sample_sums(euk) != 0)
+euk <- transform_sample_counts(euk, function(x) x / sum(x))
+euk_df <- as.data.frame(tax_table(euk))
+euk_df[is.na(euk_df)] <- "NA"
+euk <- speedyseq::relocate_tax_table(euk, "CATPhylum")
+euk_glom <- speedyseq::tax_glom(euk, "CATPhylum")
+euk_na <- rownames(euk_df[euk_df$CATPhylum == "NA",])
+euk_na_ab <- colSums(otu_table(euk)[rownames(otu_table(euk)) %in% euk_na])
+euk_ab_df <- rbind(as.data.frame(otu_table(euk_glom)), "Unknown" = euk_na_ab)
+euk_ab_df2 <- euk_ab_df[rowSums(euk_ab_df) > 0.1, ]
+euk_ab_df2 <- rbind(euk_ab_df2, "Other" = colSums(euk_ab_df[rowSums(euk_ab_df) <= 0.1, ]))
+rownames(euk_ab_df2) <- c("Arthropoda", "Nematoda", "Chordata", "Ascomycota", "Streptophyta", "Basidiomycota", "Unknown", "Other")
+euk_ab_melt <- melt(as.matrix(euk_ab_df2))
+euk_ab_melt <- cbind(euk_ab_melt, "SampleType" = c(rep("Blood", 216), rep("Feces", 72)), "Disease" = c(rep("CD", 72), rep("Healthy", 104), rep("CD", 48), rep("Healthy", 48), rep("CD", 16)))
+euk_ab_melt$Var1 <- factor(euk_ab_melt$Var1, levels = c("Ascomycota", "Basidiomycota", "Arthropoda", "Nematoda", "Chordata", "Streptophyta", "Other", "Unknown"))
+average_euk_ab <- aggregate(value ~ Var1 + SampleType, data = euk_ab_melt, FUN = mean)
+
+ggplot(average_euk_ab, aes(x = SampleType, y = value, fill = Var1)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  labs(title = "", x = "", y = "Relative abundance", fill = "") +
+  theme_classic() +
+  theme(legend.position = "right", text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_fill_manual(values = c("Ascomycota" = "#FFD43B", "Arthropoda" = "#FF9933",  "Chordata" = "#00BA38", "Nematoda" = "#0033CC", "Basidiomycota" = "#F8766D", "Streptophyta" = "#00B3A7", "Other" = "#C77CFF", "Unknown" = "grey"))
+```
+
+Composition of the bacterial non-contaminant, non-viral OTUs, at the superkingdom level. This recreates Figure S6C:
+
+```{r Non-viral bacterial, message=FALSE, warning=FALSE}
+bact_phyl <- subset_taxa(non_viral_only, CATSuperkingdom == "Bacteria")
+bact_phyl <- transform_sample_counts(bact_phyl, function(x) x / sum(x))
+bact_phyl <- speedyseq::relocate_tax_table(bact_phyl, "CATPhylum")
+bact_phyl_df <- as.data.frame(tax_table(bact_phyl))
+bact_phyl_df[is.na(bact_phyl_df)] <- "NA"
+bact_phyl_glom <- speedyseq::tax_glom(bact_phyl, "CATPhylum")
+bact_phyl_na <- rownames(bact_phyl_df[bact_phyl_df$CATPhylum == "NA",])
+bact_phyl_na_ab <- colSums(otu_table(bact_phyl)[rownames(otu_table(bact_phyl)) %in% bact_phyl_na])
+bact_phyl_ab_df <- rbind(as.data.frame(otu_table(bact_phyl_glom)), "Unknown" = bact_phyl_na_ab)
+bact_phyl_ab_df2 <- bact_phyl_ab_df[rowSums(bact_phyl_ab_df) > 1, ]
+bact_phyl_ab_df2 <- rbind(bact_phyl_ab_df2, "Other" = colSums(bact_phyl_ab_df[rowSums(bact_phyl_ab_df) <= 1, ]))
+rownames(bact_phyl_ab_df2) <- c("Bacteroidota", "Bacillota", "Pseudomonadota", "Actinomycetota", "Unknown", "Other (23 Phyla)")
+bact_phyl_ab_melt <- melt(as.matrix(bact_phyl_ab_df2))
+bact_phyl_ab_melt <- cbind(bact_phyl_ab_melt, "SampleType" = c(rep("Blood", 162), rep("Feces", 162)), "Disease" = c(rep("CD", 54), rep("Healthy", 78), rep("CD", 90), rep("Healthy", 72), rep("CD", 30)))
+bact_phyl_ab_melt$Var1 <- factor(bact_phyl_ab_melt$Var1, levels = c("Actinomycetota", "Bacteroidota", "Bacillota", "Pseudomonadota", "Other (23 Phyla)", "Unknown"))
+average_bact_phyl_ab <- aggregate(value ~ Var1 + SampleType, data = bact_phyl_ab_melt, FUN = mean)
+
+ggplot(average_bact_phyl_ab, aes(x = SampleType, y = value, fill = Var1)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  labs(title = "", x = "", y = "Relative abundance", fill = "") +
+  theme_classic() +
+  theme(legend.position = "right", text = element_text(size = 20), axis.text = element_text(color = "black"))  +
+  scale_fill_manual(values = c("Actinomycetota" = "#FFD43B", "Bacteroidota" = "#F8766D",  "Bacillota" = "#00BA38", "Pseudomonadota" = "#00BFC4", "Other (23 Phyla)" = "#C77CFF", "Unknown" = "grey"))
+```
+
+# Proportions of contaminant and non-viral OTUs
+
+Proportion of contaminant OTUs. This recreates Figure S3B:
+
+```{r Contaminant, message=FALSE, warning=FALSE}
+non_spike <- taxa_names(no_negcontrol)[!taxa_names(no_negcontrol) %in% c("SampleH1_Contig47", "SampleH8_Contig147", "SampleH11_Contig668", "SampleCD4_Contig681")]
+ab_nospike <- prune_taxa(non_spike, no_negcontrol)
+otu_table(ab_nospike) <- otu_table(ab_nospike) / as.numeric(tax_table(ab_nospike)[,"Length"])
+ab_nospike = transform_sample_counts(ab_nospike, function(x) x / sum(x))
+ab_nospike <- speedyseq::relocate_tax_table(ab_nospike, "Contaminant")
+ab_contam_glom <- speedyseq::tax_glom(ab_nospike, "Contaminant")
+contam_ab_df <- as.data.frame(otu_table(ab_contam_glom))
+rownames(contam_ab_df) <- c("Non-Contaminant", "Contaminant")
+contam_ab_melt <- melt(as.matrix(contam_ab_df))
+contam_ab_melt <- cbind(contam_ab_melt, "SampleType" = c(rep("Blood", 54), rep("Feces", 54)), "Disease" = c(rep("CD", 18), rep("Healthy", 26), rep("CD", 10), rep("CD", 20), rep("Healthy", 24), rep("CD", 10)))
+
+ggplot(contam_ab_melt[contam_ab_melt$Var1 == "Contaminant",], aes(x = SampleType, y = value, color = SampleType)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.2), size = 3) +
+  scale_color_manual(values = c("indianred", "cornflowerblue")) +
+  labs(x = "", y = "Contaminant OTUs relative abundance", title = "") +
+  scale_y_continuous(expand = expansion(mult = 0.15), breaks = seq(0, 1, by = 0.2)) +
+  theme_classic() +
+  theme(text = element_text(size = 25), legend.title = element_blank(), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Proportion of non-contaminant OTU that are viral. This recreates Figure S3C :
+
+```{r Viral of non-contaminant, message=FALSE, warning=FALSE}
+no_contam <- subset_taxa(ab_nospike, Contaminant == "No")
+ab_no_contam = transform_sample_counts(no_contam, function(x) x / sum(x))
+ab_no_contam <- speedyseq::relocate_tax_table(ab_no_contam, "Viral")
+ab_viral_glom <- speedyseq::tax_glom(ab_no_contam, "Viral")
+viral_ab_df <- as.data.frame(otu_table(ab_viral_glom))
+rownames(viral_ab_df) <- c("Viral", "Non-Viral")
+viral_ab_melt <- melt(as.matrix(viral_ab_df))
+viral_ab_melt <- cbind(viral_ab_melt, "SampleType" = c(rep("Blood", 54), rep("Feces", 54)), "Disease" = c(rep("CD", 18), rep("Healthy", 26), rep("CD", 10), rep("CD", 20), rep("Healthy", 24), rep("CD", 10)))
+
+ggplot(viral_ab_melt[viral_ab_melt$Var1 == "Viral",], aes(x = SampleType, y = value, color = SampleType)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.2), size = 3) +
+  labs(x = "", y = "vOTUs relative abundance", title = "") +
+  scale_color_manual(values = c("indianred", "cornflowerblue")) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.2)) +
+  theme_classic() +
+  theme(text = element_text(size = 25), legend.title = element_blank(), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Overall proportion of non-contaminant and viral OTUs. This recreates Figure 1E:
+
+```{r Viral and non-contaminant, message=FALSE, warning=FALSE}
+no_contam_viral <- subset_taxa(ab_nospike, Contaminant == "No" & Viral == "Yes")
+no_contam_viral_ab_df <- data.frame(value = sample_sums(no_contam_viral), SampleType = c(rep("Blood", 27), rep("Feces", 27)), Disease = c(rep("CD", 9), rep("Healthy", 13), rep("CD", 5), rep("CD", 10), rep("Healthy", 12), rep("CD", 5)))
+
+ggplot(no_contam_viral_ab_df, aes(x = SampleType, y = value, color = SampleType)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_color_manual(values = c("indianred", "cornflowerblue")) +
+  geom_jitter(position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.2), size = 3) +
+  labs(x = "", y = "Non-contaminant vOTUs", title = "") +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.2)) +
+  theme_classic() +
+  theme(text = element_text(size = 25), legend.title = element_blank(), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+# Estimation of viral particles per sample
+
+Estimations of viral particles/mL for the blood samples. This recreates Figure 2B:
+
+```{r Spike blood, message=FALSE, warning=FALSE}
+no_contam_spike <- subset_taxa(no_negcontrol, Contaminant == "No" | taxa_names(no_negcontrol) %in% c("SampleH1_Contig47", "SampleH8_Contig147", "SampleH11_Contig668", "SampleCD4_Contig681"))
+viral_spike <- subset_taxa(no_contam_spike, Viral == "Yes")
+otu_table(viral_spike) <- otu_table(viral_spike) / as.numeric(tax_table(viral_spike)[,"Length"])
+viral_spike <- transform_sample_counts(viral_spike, function(x) x / sum(x))
+spp1 <- data.frame(otu_table(viral_spike)["SampleH1_Contig47", ])
+m13 <- data.frame(otu_table(viral_spike)[c("SampleH8_Contig147", "SampleH11_Contig668", "SampleCD4_Contig681"), ])
+m13_sum <- data.frame("m13" = colSums(m13))
+spp1_merge <- spp1 %>% t() %>% as.data.frame() %>% rownames_to_column(var = "Sample")
+m13_merge <- m13_sum %>% rownames_to_column(var = "Sample")
+m13_spp1_merge <- merge(spp1_merge, m13_merge, by = "Sample")
+m13_spp1_nonnull <- m13_spp1_merge[!(m13_spp1_merge$SampleH1_Contig47 == 0 | m13_spp1_merge$m13 == 0), ]
+m13_spp1_total <- m13_spp1_nonnull %>% 
+  mutate(Total = SampleH1_Contig47 + m13) %>% 
+  select(Sample, Total)
+m13_spp1_total_pfu <- m13_spp1_total %>%
+  mutate(PFU = case_when(
+    # for fecal samples, 10^6 PFU of SPP1 was spiked, and the sample weight is 0.2 g for all samples
+    endsWith(Sample, "_F") ~ (((1 - Total) * (2 * 10^6)) / Total) / 0.2,
+    # for blood samples A-E, 10^6 of SPP1 was spiked, and the sample volume is 3 mL for all samples
+    Sample %in% c("H1_B", "H2_B", "H3_B", "H4_B", "H5_B") ~ (((1 - Total) * (2 * 10^6)) / Total) / 3,
+    # for the other blood samples, 10^4 of SPP1 was spiked, and the sample volume is 3 mL for all samples
+    endsWith(Sample, "_B") ~ (((1 - Total) * (2 * 10^4)) / Total) / 3
+  )) %>%
+  # remove the column with relative abundance values
+  select(-Total)
+m13_spp1_total_df <- cbind(m13_spp1_total_pfu, "logPFU" = log10(m13_spp1_total_pfu$PFU), "SampleType" = ifelse(substr(m13_spp1_total_pfu$Sample, nchar(m13_spp1_total_pfu$Sample), nchar(m13_spp1_total_pfu$Sample)) == "B", "Blood", "Feces"), "Disease" = c(rep("CD", 21), rep("Healthy", 18)))
+
+ggplot(m13_spp1_total_df[m13_spp1_total_df$SampleType == "Blood",], aes(x = "", y = logPFU)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "log(viral particles/mL of blood)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_y_continuous(breaks = seq(0, 8, 2), limits = c(0, 8)) +
+  guides(color = "none")
+```
+
+CD vs. healthy comparison of the viral particles/mL of the blood samples. This recreates Figure S11A:
+
+```{r Spike blood comparison, message=FALSE, warning=FALSE}
+ggplot(m13_spp1_total_df[m13_spp1_total_df$SampleType == "Blood",], aes(x = Disease, y = logPFU, color = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  labs(x = "", y = "log(viral particles/mL of blood)", title = "") +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_y_continuous(breaks = seq(0, 8, 2), limits = c(0, 8)) +
+  guides(color = "none")
+```
+
+Estimations of viral particles/g for the fecal samples. This recreates Figure S9B:
+
+```{r Spike feces, message=FALSE, warning=FALSE}
+ggplot(m13_spp1_total_df[m13_spp1_total_df$SampleType == "Feces",], aes(x = "", y = logPFU)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "cornflowerblue") +
+  geom_jitter(width = 0.1, size = 3, color = "cornflowerblue") +
+  labs(x = "", y = "log(viral particles/g of feces)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_y_continuous(breaks = seq(0, 10, 2), limits = c(0, 10)) +
+  guides(color = "none")
+```
+
+CD vs. healthy comparison of the viral particles/g of the fecal samples. This recreates Figure S11D:
+
+```{r Spike feces comparison, message=FALSE, warning=FALSE}
+ggplot(m13_spp1_total_df[m13_spp1_total_df$SampleType == "Feces",], aes(x = Disease, y = logPFU, color = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  labs(x = "", y = "log(viral particles/g of feces)", title = "") +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  scale_y_continuous(breaks = seq(0, 12, 2), limits = c(0, 12)) +
+  guides(color = "none")
+```
+
+# Eukaryotic viruses
+
+Heatmap of the presence of eukaryotic viruses across the blood samples. This recreates Figure S7:
+
+```{r Eukaryotic viruses, message=FALSE, warning=FALSE}
+euk_viruses <- c("CrossAssembly_Contig34025", "CrossAssembly_Contig39474", "CrossAssembly_Contig43597", "CrossAssembly_Contig57687", "CrossAssembly_Contig58060", "SampleH1_Contig5751", "SampleCD13_Contig909", "SampleH3_Contig4642", "BloodCollectionTube_Contig513", "SampleCD2_Contig3683")
+euk_viruses_names <- data.frame(Contig = euk_viruses, RefSeqHomolog = c("Pandoravirus macleodensis contig 2", "Torque teno virus 3", "Torque teno virus 24", "Pandoravirus macleodensis contig 3", "Pandoravirus macleodensis contig 4", "Pandoravirus macleodensis contig 1", "Sewage-associated gemycircularvirus-4 isolate BS3913", "Human herpesvirus 7 contig 1", "Human herpesvirus 7 contig 2", "Plant viruses"))
+euk_virus <- prune_taxa(taxa_names(ab) %in% euk_viruses, ab)
+euk_virus_ab <- data.frame(otu_table(euk_virus))
+euk_virus_ab[euk_virus_ab > 0] <- 1
+euk_virus_ab$Contig <- rownames(euk_virus_ab)
+euk_virus_ab_names <- merge(euk_virus_ab, euk_viruses_names, by.x = "Contig", by.y = "Contig", all.x = TRUE, sort = FALSE)
+rownames(euk_virus_ab) <- euk_virus_ab_names$RefSeqHomolog
+euk_virus_ab <- euk_virus_ab[, -ncol(euk_virus_ab)]
+euk_virus_ab <- euk_virus_ab[c(7, 8, 2, 3, 5, 1, 6, 9, 10) ,]
+colnames(euk_virus_ab)[1:2] <- c("Blood Sampling Tube", "Microtube")
+euk_virus_blood <- euk_virus_ab %>% select(!ends_with("_F"))
+euk_virus_blood <- euk_virus_blood[, c(colnames(euk_virus_blood)[1], colnames(euk_virus_blood)[2], mixedsort(colnames(euk_virus_blood)[3:length(colnames(euk_virus_blood))]))]
+
+pheatmap(euk_virus_blood, color = c("white", "olivedrab"), cluster_rows = FALSE, cluster_cols = FALSE, legend = FALSE)
+```
+
+# Analysis of the fecal samples
+
+Number of vOTUs per fecal sample. This recreates Figure S9A:
+
+```{r Number feces, message=FALSE, warning=FALSE}
+ab_nospike <- prune_taxa(non_spike, no_negcontrol)
+no_contam <- subset_taxa(ab_nospike, Contaminant == "No")
+viral <- subset_taxa(no_contam, Viral == "Yes")
+viral_counts_df <- data.frame(Counts = sample_sums(viral), SampleType = c(rep("Blood", 27), rep("Feces", 27)), Disease = c(rep("CD", 9), rep("Healthy", 13), rep("CD", 15), rep("Healthy", 12), rep("CD", 5)))
+feces <- subset_samples(viral, SampleType == "Stool")
+feces <- rarefy_even_depth(feces, sample.size = min(subset(viral_counts_df, SampleType == "Feces")$Counts), rngseed = 4682)
+otu_table(feces) <- otu_table(feces) / as.numeric(tax_table(feces)[,"Length"])
+feces = transform_sample_counts(feces, function(x) x / sum(x))
+viral_table_feces  = apply(otu_table(feces), MARGIN = 2, function(x) {sum(x != 0)}, simplify = TRUE)
+viral_number_feces_df <- data.frame(value = viral_table_feces, Disease = c(rep("CD", 10), rep("Healthy", 12), rep("CD", 5)))
+
+ggplot(viral_number_feces_df, aes(x = "", y = value)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "cornflowerblue") +
+  geom_jitter(width = 0.1, size = 3, color = "cornflowerblue") +
+  labs(x = "", y = "Number of viral contigs", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+CD vs healthy comparison of the number of vOTUs per fecal sample. This recreates Figure S12E:
+
+```{r Number feces comparison, message=FALSE, warning=FALSE}
+ggplot(viral_number_feces_df, aes(x = Disease, y = value, color = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  labs(x = "", y = "Number of viral contigs", title = "") +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Heatmap of the fecal vOTUs across the fecal samples. This recreates Figure 4D:
+
+```{r Heatmap feces, message=FALSE, warning=FALSE}
+heatmap_feces <- plot_heatmap(feces, low = "yellow", high = "red", sample.order =  mixedsort(sample_names(feces))) + 
+  theme(strip.background = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle = -90, hjust = 0, vjust = 0.5, color = "black"),
+        strip.text.x = element_text(size = 16),
+        legend.text = element_blank()) +
+  labs(fill = "Relative\nAbundance") +
+  guides(fill = guide_colorbar(ticks.colour = NA)) +
+  facet_grid(. ~ Disease, scales = 'free', labeller = as_labeller(c(`Crohn` = "CD", `Healthy` = "Healthy")))
+heatmap_feces$scales$scales[[1]]$name <- "Viral contigs"
+heatmap_feces
+```
+
+Distribution of the host bacteria of the fecal vOTUs, at the phylum level. This recreates Figure S9C:
+
+```{r Host feces, message=FALSE, warning=FALSE}
+feces_phyl_ab <- data.frame("HostPhylum" = tax_table(feces)[, "HostPhylum"], "Abundance" = rowSums(otu_table(feces)))
+feces_phyl_ab$HostPhylum[is.na(feces_phyl_ab$HostPhylum)] <- "Unknown"
+sum_phylum_feces <- aggregate(Abundance ~ HostPhylum, feces_phyl_ab, sum)
+sum_phylum_feces <- rbind(sum_phylum_feces[!sum_phylum_feces$Abundance < 0.8,], data.frame("HostPhylum" = "Other (12 Phyla)", "Abundance" = sum(sum_phylum_feces$Abundance[sum_phylum_feces$Abundance < 0.8])))
+sum_phylum_feces$Percent <- paste0(round((sum_phylum_feces$Abundance / sum(sum_phylum_feces$Abundance)) * 100), "%")
+sum_phylum_feces$HostPhylum <- factor(sum_phylum_feces$HostPhylum, levels = c("Actinomycetota", "Bacteroidota", "Bacillota", "Pseudomonadota", "Other (12 Phyla)", "Unknown"))
+
+ggplot(sum_phylum_feces, aes(x = "", y = Abundance, fill = HostPhylum)) +
+  geom_bar(stat="identity", width=1, color = "white") +
+  coord_polar("y", start=0) +
+  labs(fill = "Host phylum") +
+  #geom_text(aes(x =  1.3, label = Percent), position = position_stack(vjust = 0.5), size = 5) +
+  scale_fill_manual(values = c("#FFD43B", "#F8766D", "#00BA38", "#00BFC4", "#C77CFF", "grey")) +
+  theme_void() +
+  theme(text = element_text(size = 25))
+```
+
+CD vs. healthy comparison of the host bacteria of the fecal vOTUs, at the phylum level. This recreates Figure S11F:
+
+```{r Host feces comparison, message=FALSE, warning=FALSE}
+tax_mat2 <- tax_mat
+tax_mat2[is.na(tax_mat2)] <- "Unknown"
+contig_info2 <- tax_table(tax_mat2)
+feces_sample_NA <- phyloseq(otu_table(feces), contig_info2, sample_data(feces))
+feces_sample_hostphyl <- speedyseq::relocate_tax_table(feces_sample_NA, "HostPhylum")
+feces_sample_hostphyl_glom <- speedyseq::tax_glom(feces_sample_hostphyl, "HostPhylum")
+feces_sample_hostphyl_ab <- as.data.frame(otu_table(feces_sample_hostphyl_glom))
+feces_sample_hostphyl_ab <- cbind(HostPhylum = as.vector(tax_table(feces_sample_NA)[rownames(feces_sample_hostphyl_ab), "HostPhylum"]), feces_sample_hostphyl_ab)
+other_sample_feces_ab <- feces_sample_hostphyl_ab[rowSums(feces_sample_hostphyl_ab[2:nrow(feces_sample_hostphyl_ab)]) < 0.5, ]$HostPhylum
+other_feces_sample <- feces_sample_hostphyl_ab %>%
+    filter(HostPhylum %in% other_sample_feces_ab) %>%
+    select(-HostPhylum) %>%
+    summarise_all(sum)
+feces_sample_hostphyl_ab <- bind_rows(feces_sample_hostphyl_ab[!feces_sample_hostphyl_ab$HostPhylum %in% other_sample_feces_ab,], c(list(HostPhylum = "Other (11 Phyla)"), other_feces_sample))
+feces_sample_hostphyl_per <- feces_sample_hostphyl_ab %>% mutate(across(starts_with("Stool"), ~ . / sum(.), .names = "{.col}"))
+feces_sample_hostphyl_melt <- melt(feces_sample_hostphyl_per, id.vars = "HostPhylum")
+feces_sample_hostphyl_melt <- cbind(feces_sample_hostphyl_melt , Disease = c(rep("CD", 60), rep("Healthy", 72), rep("CD", 30)))
+feces_sample_hostphyl_melt$HostPhylum <- factor(feces_sample_hostphyl_melt$HostPhylum, levels = c("Actinomycetota", "Bacteroidota", "Bacillota", "Pseudomonadota", "Other (11 Phyla)", "Unknown"))
+
+ggplot(feces_sample_hostphyl_melt, aes(x = HostPhylum, y = value, color = Disease)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.75)) +
+  geom_point(position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.2), size = 2.5) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  stat_compare_means(method = "wilcox.test", aes(group = Disease), label = "p.format", position = position_nudge(y = 0.05)) +
+  labs(x = "Host phylum", y = "Relative abundance", title = "") +
+  theme_classic() +
+  theme(text = element_text(size = 15), axis.text.x = element_text(angle = -30, hjust = 0, vjust = 1), axis.text = element_text(color = "black"), legend.title = element_blank())
+```
+
+CD vs healthy comparison of the proportion of phages infecting Faecalibacterium genus in the fecal samples. This recreates Figure S11G:
+
+```{r Faecalibacterium phages feces comparison, message=FALSE, warning=FALSE}
+feces_sample_hostgenus <- speedyseq::relocate_tax_table(feces_sample_NA, "HostGenus")
+feces_sample_hostgenus_glom <- speedyseq::tax_glom(feces_sample_hostgenus, "HostGenus")
+feces_sample_hostgenus_ab <- as.data.frame(otu_table(feces_sample_hostgenus_glom))
+feces_sample_hostgenus_ab <- cbind(HostGenus = as.vector(tax_table(feces_sample_NA)[rownames(feces_sample_hostgenus_ab), "HostGenus"]), feces_sample_hostgenus_ab)
+feces_sample_fe_ab <- feces_sample_hostgenus_ab[feces_sample_hostgenus_ab$HostGenus == "Faecalibacterium", ]
+feces_sample_fe_melt <- melt(feces_sample_fe_ab, id.vars = "HostGenus")
+feces_sample_fe_melt <- cbind(feces_sample_fe_melt , Disease = c(rep("CD", 10), rep("Healthy", 12), rep("CD", 5)))
+
+ggplot(feces_sample_fe_melt, aes(x = Disease, y = value, color = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Phages infecting\nFaecalibacterium", title = "", subtitle = "") +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+Proportion of temperate phages in the fecal samples. This recreates Figure S9D:
+
+```{r Temperate phages feces, message=FALSE, warning=FALSE}
+tax_feces <- as.data.frame(tax_table(feces))
+tax_feces[is.na(tax_feces)] <- "NA"
+feces_temperate_hq_df <- data.frame(Sample = character(0), PresentHQ = integer(0), Integrase = integer(0), Percent = integer(0), AbundanceHQ = numeric(0), AbundanceTemp = numeric(0), AbundancePercent = numeric(0))
+for (i in colnames(otu_table(feces))) {
+  non_null_otus <- rownames(otu_table(feces)[otu_table(feces)[, i] != 0, i])
+  non_microviridae_otus <- non_null_otus[tax_feces[non_null_otus, "Family"] != "Microviridae"]
+  hq_complete_otus <- non_microviridae_otus[tax_feces[non_microviridae_otus, "Quality"] %in% c("Complete", "High-quality")]
+  if (length(hq_complete_otus) == 0) {
+  integrase_count <- NA
+  abundance_hq <- 0
+  abundance_temp <- NA
+  } else {
+  abundance_hq <- sum(as.numeric(otu_table(feces)[hq_complete_otus, i]))
+  integrase_count <- sum(as.numeric(tax_feces[hq_complete_otus, "Integrase"]) > 0)
+  if (integrase_count == 0){
+    abundance_temp <- 0  
+    } else {
+      abundance_temp <- sum(as.numeric(otu_table(feces)[hq_complete_otus[which(as.numeric(tax_feces[hq_complete_otus, "Integrase"]) >0)], i]))
+    }
+  }
+  feces_temperate_hq_df <- rbind(feces_temperate_hq_df, data.frame(Sample = i, PresentHQ = length(hq_complete_otus), Integrase = integrase_count, Percent = integrase_count/length(hq_complete_otus)*100, AbundanceHQ = abundance_hq, AbundanceTemp = abundance_temp, AbundancePercent = (abundance_temp/abundance_hq)*100))
+}
+feces_temperate_hq_df <- cbind(feces_temperate_hq_df, Disease = c(rep("CD", 10), rep("Healthy", 12), rep("CD", 5)))
+
+ggplot(feces_temperate_hq_df, aes(x = "", y = Percent)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "cornflowerblue") +
+  geom_jitter(width = 0.1, size = 3, color = "cornflowerblue") +
+  labs(x = "", y = "Temperate / High-quality vOTUs (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+CD vs healthy comparison of the proportion of temperate phages in the fecal samples. This recreates Figure S11E:
+
+```{r Temperate phages feces comparison, message=FALSE, warning=FALSE}
+ggplot(feces_temperate_hq_df, aes(x = Disease, y = Percent, color = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  labs(x = "", y = "Temperate / High-quality vOTUs (%)", title = "") +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+Proportion of abundance of temperate phages in the fecal samples. This recreates Figure S8B:
+
+```{r Temperate phages feces abundance, message=FALSE, warning=FALSE}
+ggplot(feces_temperate_hq_df, aes(x = "", y = AbundancePercent)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "cornflowerblue") +
+  geom_jitter(width = 0.1, size = 3, color = "cornflowerblue") +
+  labs(x = "", y = "Temperate / High-quality vOTUs relative abundance (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+Measurement of alpha-diversity using the Chao1 index for fecal samples. This recreates Figure S12F:
+
+```{r Chao1 feces, message=FALSE, warning=FALSE}
+feces_raw <- subset_samples(viral, SampleType == "Stool")
+feces_raw <- rarefy_even_depth(feces_raw, sample.size = min(subset(viral_counts_df, SampleType == "Feces")$Counts), rngseed = 4682)
+chao1_feces <- estimate_richness(feces_raw, measures = "Chao1")
+chao1_feces$Disease <- sample_data(feces_raw)$Disease
+chao1_feces$Disease <- ifelse(chao1_feces$Disease == "Crohn", "CD", chao1_feces$Disease)
+
+ggplot(chao1_feces, aes(x = Disease, y = Chao1, colour = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Chao1 index", title = "") +
+  theme_classic() + 
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Measurement of alpha-diversity using the Shannon index for fecal samples. This recreates Figure 4E:
+
+```{r Shannon feces, message=FALSE, warning=FALSE}
+shannon_feces <- estimate_richness(feces, measures = "Shannon")
+shannon_feces$Disease <- sample_data(feces)$Disease
+shannon_feces$Disease <- ifelse(shannon_feces$Disease == "Crohn", "CD", shannon_feces$Disease)
+
+ggplot(shannon_feces, aes(x = Disease, y = Shannon, colour = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Shannon index", title = "") +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Measurement of alpha-diversity using the Simpson index for fecal samples. This recreates Figure S12G:
+
+```{r Simspon feces, message=FALSE, warning=FALSE}
+simpson_feces <- estimate_richness(feces, measures = "Simpson")
+simpson_feces$Disease <- sample_data(feces)$Disease
+simpson_feces$Disease <- ifelse(simpson_feces$Disease == "Crohn", "CD", simpson_feces$Disease)
+
+ggplot(simpson_feces, aes(x = Disease, y = Simpson, colour = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Simpson index", title = "") +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Measurement of beta-diversity using the Jaccard distances for fecal samples. This recreates Figure S12H:
+
+```{r Jaccard feces, message=FALSE, warning=FALSE}
+jcc_feces <- phyloseq::distance(feces, method = "jaccard")
+set.seed(1115)
+adonis_jcc_feces <- adonis2(formula = jcc_feces ~ Disease, data = data.frame(sample_data(feces)))
+res_adonis_jcc_feces <- paste0("Adonis2, p = ", adonis_jcc_feces$`Pr(>F)`[1])
+ord_PCoA_jcc_feces <- ordinate(feces, method = "PCoA", distance = jcc_feces)
+
+plot_ordination(feces, ord_PCoA_jcc_feces, color = "Disease") +
+  scale_color_manual(labels = c("CD", "Healthy"), values = c("darkorange", "darkgreen")) +
+  geom_point(size = 3) +
+  labs(x = "Component 1 (5.1%)", y = "Component 2 (4.8%)", title = "", subtitle = res_adonis_jcc_feces) +
+  theme_classic() +
+  theme(text = element_text(size = 20), legend.title = element_blank(), axis.text = element_text(color = "black")) +
+  stat_ellipse()
+```
+
+Measurement of beta-diversity using the Bray-Curtis distances for fecal samples. This recreates Figure 4F:
+
+```{r Bray-Curtis feces, message=FALSE, warning=FALSE}
+bc_feces <- phyloseq::distance(feces, method = "bray")
+set.seed(1115)
+adonis_bc_feces <- adonis2(formula = bc_feces ~ Disease, data = data.frame(sample_data(feces)))
+res_adonis_bc_feces <- paste0("Adonis2, p = ", adonis_bc_feces$`Pr(>F)`[1])
+ord_PCoA_bc_feces <- ordinate(feces, method = "PCoA", distance = bc_feces)
+
+plot_ordination(feces, ord_PCoA_bc_feces, color = "Disease") +
+  scale_color_manual(labels = c("CD", "Healthy"), values = c("darkorange", "darkgreen")) +
+  geom_point(size = 3) +
+  labs(x = "Component 1 (6.2%)", y = "Component 2 (5.6%)", title = "", subtitle = res_adonis_bc_feces) +
+  theme_classic() +
+  theme(text = element_text(size = 20), legend.title = element_blank(), axis.text = element_text(color = "black")) +
+  stat_ellipse()
+```
+
+# Analysis of the blood samples
+
+Number of vOTUs per blood sample. This recreates Figure 2A:
+
+```{r Number blood, message=FALSE, warning=FALSE}
+blood <- subset_samples(viral, SampleType == "Plasma")
+blood <- rarefy_even_depth(blood, sample.size = 7653, rngseed = 5984)
+otu_table(blood) <- otu_table(blood) / as.numeric(tax_table(blood)[,"Length"])
+blood = transform_sample_counts(blood, function(x) x / sum(x))
+viral_table_blood  = apply(otu_table(blood), MARGIN = 2, function(x) {sum(x != 0)}, simplify = TRUE)
+viral_number_blood_df <- data.frame(value = viral_table_blood, Disease = c(rep("CD", 8), rep("Healthy", 11), rep("CD", 5)))
+
+ggplot(viral_number_blood_df, aes(x = "", y = value)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Number of viral contigs", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+CD vs healthy comparison of the number of vOTUs per blood sample. This recreates Figure S12A:
+
+```{r Number blood comparison, message=FALSE, warning=FALSE}
+ggplot(viral_number_blood_df, aes(x = Disease, y = value, color = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Number of viral contigs", title = "") +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Heatmap of the blood vOTUs across the fecal samples. This recreates Figure 4D:
+
+```{r Heatmap blood, message=FALSE, warning=FALSE}
+heatmap_blood <- plot_heatmap(blood, low = "yellow", high = "red", sample.order = mixedsort(sample_names(blood))) + 
+  theme(strip.background = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle = -90, hjust = 0, vjust = 0.5, color = "black"),
+        strip.text.x = element_text(size = 16),
+        legend.text = element_blank()) +
+  labs(fill = "Relative\nAbundance") +
+  guides(fill = guide_colorbar(ticks.colour = NA)) +
+  facet_grid(. ~ Disease, scales = 'free', labeller = as_labeller(c(`Crohn` = "CD", `Healthy` = "Healthy")))
+heatmap_blood$scales$scales[[1]]$name <- "Viral contigs"
+heatmap_blood
+```
+
+Distribution of the host bacteria of the blood vOTUs, at the phylum level. This recreates Figure 2C:
+
+```{r Host blood, message=FALSE, warning=FALSE}
+blood_phyl_ab <- data.frame("HostPhylum" = tax_table(blood)[, "HostPhylum"], "Abundance" = rowSums(otu_table(blood)))
+blood_phyl_ab$HostPhylum[is.na(blood_phyl_ab$HostPhylum)] <- "Unknown"
+sum_phylum_blood <- aggregate(Abundance ~ HostPhylum, blood_phyl_ab, sum)
+sum_phylum_blood <- rbind(sum_phylum_blood[!sum_phylum_blood$Abundance < 0.6,], data.frame("HostPhylum" = "Other (5 Phyla)", "Abundance" = sum(sum_phylum_blood$Abundance[sum_phylum_blood$Abundance < 0.6])))
+sum_phylum_blood$Percent <- paste0(round((sum_phylum_blood$Abundance / sum(sum_phylum_blood$Abundance)) * 100), "%")
+sum_phylum_blood$HostPhylum <- factor(sum_phylum_blood$HostPhylum, levels = c("Actinomycetota", "Bacteroidota", "Bacillota", "Pseudomonadota", "Other (5 Phyla)", "Unknown"))
+
+ggplot(sum_phylum_blood, aes(x = "", y = Abundance, fill = HostPhylum)) +
+  geom_bar(stat="identity", width=1, color = "white") +
+  coord_polar("y", start=0) + 
+  labs(fill = "Host phylum") +
+  # geom_text(aes(label = Percent), position = position_stack(vjust = 0.5), size = 6) +
+  scale_fill_manual(values = c("#FFD43B", "#F8766D", "#00BA38", "#00BFC4", "#C77CFF", "grey")) +
+  theme_void() +
+  theme(text = element_text(size = 25))
+```
+
+CD vs. healthy comparison of the host bacteria of the blood vOTUs, at the phylum level. This recreates Figure S11C:
+
+```{r Host blood comparison, message=FALSE, warning=FALSE}
+blood_sample_NA <- phyloseq(otu_table(blood), contig_info2, sample_data(blood))
+blood_sample_hostphyl <- speedyseq::relocate_tax_table(blood_sample_NA, "HostPhylum")
+blood_sample_hostphyl_glom <- speedyseq::tax_glom(blood_sample_hostphyl, "HostPhylum")
+blood_sample_hostphyl_ab <- as.data.frame(otu_table(blood_sample_hostphyl_glom))
+blood_sample_hostphyl_ab <- cbind(HostPhylum = as.vector(tax_table(blood_sample_NA)[rownames(blood_sample_hostphyl_ab), "HostPhylum"]), blood_sample_hostphyl_ab)
+other_sample_blood_ab <- blood_sample_hostphyl_ab[rowSums(blood_sample_hostphyl_ab[2:nrow(blood_sample_hostphyl_ab)]) < 0.1, ]$HostPhylum
+other_blood_sample <- blood_sample_hostphyl_ab %>%
+    filter(HostPhylum %in% other_sample_blood_ab) %>%
+    select(-HostPhylum) %>%
+    summarise_all(sum)
+blood_sample_hostphyl_ab <- bind_rows(blood_sample_hostphyl_ab[!blood_sample_hostphyl_ab$HostPhylum %in% other_sample_blood_ab,], c(list(HostPhylum = "Other (5 Phyla)"), other_blood_sample))
+blood_sample_hostphyl_per <- blood_sample_hostphyl_ab %>% mutate(across(starts_with("Stool"), ~ . / sum(.), .names = "{.col}"))
+blood_sample_hostphyl_melt <- melt(blood_sample_hostphyl_per, id.vars = "HostPhylum")
+blood_sample_hostphyl_melt <- cbind(blood_sample_hostphyl_melt , Disease = c(rep("CD", 48), rep("Healthy", 66), rep("CD", 30)))
+blood_sample_hostphyl_melt$HostPhylum <- factor(blood_sample_hostphyl_melt$HostPhylum, levels = c("Actinomycetota", "Bacteroidota", "Bacillota", "Pseudomonadota", "Other (5 Phyla)", "Unknown"))
+
+ggplot(blood_sample_hostphyl_melt, aes(x = HostPhylum, y = value, color = Disease)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.75)) +
+  geom_point(position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.2), size = 2.5) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  stat_compare_means(method = "wilcox.test", aes(group = Disease), label = "p.format", position = position_nudge(y = 0.05)) +
+  labs(x = "Host phylum", y = "Relative abundance", title = "") +
+  theme_classic() + 
+  theme(text = element_text(size = 15), axis.text.x = element_text(angle = -30, hjust = 0, vjust = 1), axis.text = element_text(color = "black"), legend.title = element_blank())
+```
+
+Proportion of temperate phages in the blood samples. This recreates Figure 2D:
+
+```{r Temperate phages blood, message=FALSE, warning=FALSE}
+tax_blood <- as.data.frame(tax_table(blood))
+tax_blood[is.na(tax_blood)] <- "NA"
+blood_temperate_hq_df <- data.frame(Sample = character(0), PresentHQ = integer(0), Integrase = integer(0), Percent = integer(0), AbundanceHQ = numeric(0), AbundanceTemp = numeric(0), AbundancePercent = numeric(0))
+for (i in colnames(otu_table(blood))) {
+  non_null_otus <- rownames(otu_table(blood)[otu_table(blood)[, i] != 0, i])
+  non_microviridae_otus <- non_null_otus[tax_blood[non_null_otus, "Family"] != "Microviridae"]
+  hq_complete_otus <- non_microviridae_otus[tax_blood[non_microviridae_otus, "Quality"] %in% c("Complete", "High-quality")]
+  if (length(hq_complete_otus) == 0) {
+  integrase_count <- NA
+  abundance_hq <- 0
+  abundance_temp <- NA
+  } else {
+  abundance_hq <- sum(as.numeric(otu_table(blood)[hq_complete_otus, i]))
+  integrase_count <- sum(as.numeric(tax_blood[hq_complete_otus, "Integrase"]) > 0)
+  if (integrase_count == 0){
+    abundance_temp <- 0  
+    } else {
+      abundance_temp <- sum(as.numeric(otu_table(blood)[hq_complete_otus[which(as.numeric(tax_blood[hq_complete_otus, "Integrase"]) >0)], i]))
+    }
+  }
+  blood_temperate_hq_df <- rbind(blood_temperate_hq_df, data.frame(Sample = i, PresentHQ = length(hq_complete_otus), Integrase = integrase_count, Percent = integrase_count/length(hq_complete_otus)*100, AbundanceHQ = abundance_hq, AbundanceTemp = abundance_temp, AbundancePercent = (abundance_temp/abundance_hq)*100))
+}
+blood_temperate_hq_df <- cbind(blood_temperate_hq_df, Disease = c(rep("CD", 8), rep("Healthy", 11), rep("CD", 5)))
+
+ggplot(blood_temperate_hq_df, aes(x = "", y = Percent)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Temperate / High-quality vOTUs (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+CD vs healthy comparison of the proportion of temperate phages in the fecal samples. This recreates Figure S11B:
+
+```{r Temperate phages blood comparison, message=FALSE, warning=FALSE}
+ggplot(blood_temperate_hq_df, aes(x = Disease, y = Percent, color = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Temperate / High-quality vOTUs (%)", title = "") +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Proportion of abundance of temperate phages in the blood samples. This recreates Figure S8A:
+
+```{r Temperate phages blood abundance, message=FALSE, warning=FALSE}
+ggplot(blood_temperate_hq_df, aes(x = "", y = AbundancePercent)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Temperate / High-quality vOTUs relative abundance (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+Measurement of alpha-diversity using the Chao1 index for blood samples. This recreates Figure S12B:
+
+```{r Chao1 blood, message=FALSE, warning=FALSE}
+blood_raw <- subset_samples(viral, SampleType == "Plasma")
+blood_raw <- rarefy_even_depth(blood_raw, sample.size = 7653, rngseed = 5984)
+chao1_blood <- estimate_richness(blood_raw, measures = "Chao1")
+chao1_blood$Disease <- sample_data(blood_raw)$Disease
+chao1_blood$Disease <- ifelse(chao1_blood$Disease == "Crohn", "CD", chao1_blood$Disease)
+
+ggplot(chao1_blood, aes(x = Disease, y = Chao1, colour = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Chao1 index", title = "") +
+  theme_classic() + 
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Measurement of alpha-diversity using the Shannon index for blood samples. This recreates Figure 4B:
+
+```{r Shannon blood, message=FALSE, warning=FALSE}
+shannon_blood <- estimate_richness(blood, measures = "Shannon")
+shannon_blood$Disease <- sample_data(blood)$Disease
+shannon_blood$Disease <- ifelse(shannon_blood$Disease == "Crohn", "CD", shannon_blood$Disease)
+
+ggplot(shannon_blood, aes(x = Disease, y = Shannon, colour = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Shannon index", title = "") +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Measurement of alpha-diversity using the Simpson index for blood samples. This recreates Figure S12C:
+
+```{r Simpson blood, message=FALSE, warning=FALSE}
+simpson_blood <- estimate_richness(blood, measures = "Simpson")
+simpson_blood$Disease <- sample_data(blood)$Disease
+simpson_blood$Disease <- ifelse(simpson_blood$Disease == "Crohn", "CD", simpson_blood$Disease)
+
+ggplot(simpson_blood, aes(x = Disease, y = Simpson, colour = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Simpson index", title = "") +
+  theme_classic() + 
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Measurement of beta-diversity using the Jaccard distances for blood samples. This recreates Figure S12D:
+
+```{r Jaccard blood, message=FALSE, warning=FALSE}
+jcc_blood <- phyloseq::distance(blood, method = "jaccard")
+set.seed(1115)
+adonis_jcc_blood <- adonis2(formula = jcc_blood ~ Disease, data = data.frame(sample_data(blood)))
+res_adonis_jcc_blood <- paste0("Adonis2, p = ", adonis_jcc_blood$`Pr(>F)`[1])
+ord_PCoA_jcc_blood <- ordinate(blood, method = "PCoA", distance = jcc_blood)
+
+plot_ordination(blood, ord_PCoA_jcc_blood, color = "Disease") +
+  scale_color_manual(labels = c("CD", "Healthy"), values = c("darkorange", "darkgreen")) +
+  geom_point(size = 3) +
+  labs(x = "Component 1 (14%)", y = "Component 2 (9.7%)", title = "", subtitle = res_adonis_jcc_blood) +
+  theme_classic() +
+  theme(text = element_text(size = 20), legend.title = element_blank(), axis.text = element_text(color = "black")) +
+  stat_ellipse()
+```
+
+Measurement of beta-diversity using the Bray-Curtis distances for blood samples. This recreates Figure 4C:
+
+```{r Bray-Curtis blood, message=FALSE, warning=FALSE}
+bc_blood <- phyloseq::distance(blood, method = "bray")
+set.seed(1115)
+adonis_bc_blood <- adonis2(formula = bc_blood ~ Disease, data = data.frame(sample_data(blood)))
+res_adonis_bc_blood <- paste0("Adonis2, p = ", adonis_bc_blood$`Pr(>F)`[1])
+ord_PCoA_bc_blood <- ordinate(blood, method = "PCoA", distance = bc_blood)
+
+plot_ordination(blood, ord_PCoA_bc_blood, color = "Disease") +
+  scale_color_manual(labels = c("CD", "Healthy"), values = c("darkorange", "darkgreen")) +
+  geom_point(size = 3) +
+  labs(x = "Component 1 (18.3%)", y = "Component 2 (12.2%)", title = "", subtitle = res_adonis_bc_blood) +
+  theme_classic() +
+  theme(text = element_text(size = 20), legend.title = element_blank(), axis.text = element_text(color = "black")) +
+  stat_ellipse()
+```
+
+# Analysis of the origin of the blood vOTUs
+
+Comparison of the vOTUs found in blood and fecal samples. This recreates Figure 3A:
+
+```{r Venn blood feces, message=FALSE, warning=FALSE}
+blood_feces_contigs <- list(Blood = rownames(tax_table(blood)), Feces = rownames(tax_table(feces)))
+
+ggvenn(blood_feces_contigs, fill_color = c("indianred", "cornflowerblue"), text_size = 10)
+```
+
+Number of blood vOTUs found in fecal samples. This recreates Figure 3B:
+
+```{r Fecal origin, message=FALSE, warning=FALSE}
+shared_contigs <- intersect(blood_feces_contigs$Blood, blood_feces_contigs$Feces)
+shared_contigs_sample <- c()
+total_sample <- c()
+ab_shared_contigs_sample <- c()
+for (i in colnames(otu_table(blood))) {
+  shared_contigs_sample <- c(shared_contigs_sample, sum(otu_table(blood)[shared_contigs, i]>0))
+  total_sample <- c(total_sample, sum(otu_table(blood)[, i]>0))
+  ab_shared_contigs_sample <- c(ab_shared_contigs_sample, sum(otu_table(blood)[shared_contigs, i]))
+}
+shared_contigs_sample_df <- data.frame(Sample = colnames(otu_table(blood)), Shared = shared_contigs_sample, Total = total_sample, Percent = (shared_contigs_sample/total_sample)*100, SharedAb = ab_shared_contigs_sample, Disease = c(rep("CD", 8), rep("Healthy", 11), rep("CD", 5)))
+
+ggplot(shared_contigs_sample_df, aes(x = "", y = Percent)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Blood vOTUs present in fecal samples (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Abundance of blood vOTUs found in fecal samples. This recreates Figure S10A:
+
+```{r Fecal origin abundance, message=FALSE, warning=FALSE}
+ggplot(shared_contigs_sample_df, aes(x = "", y = SharedAb)) +
+  geom_boxplot(outlier.shape = NA, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Blood vOTUs in gut samples", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Number of blood vOTUs homologous to gut viruses. This recreates Figure 3C:
+
+```{r Gut origin, message=FALSE, warning=FALSE}
+gut_factor <- factor(tax_table(blood)[, "Gut"])
+gut_table  = apply(otu_table(blood), MARGIN = 2, function(x) {
+  tapply(x, INDEX = gut_factor, FUN = function(y) length(y[y != 0]), simplify = TRUE)
+})
+gut_number_df <- data.frame(Gut = gut_table["1",], NonGut = gut_table["0",], Percent = (gut_table["1",]/(gut_table["0",]+gut_table["1",]))*100, Disease = c(rep("CD", 8), rep("Healthy", 11), rep("CD", 5)))
+
+ggplot(gut_number_df, aes(x = "", y = Percent)) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Blood vOTUs homologous to gut viruses (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Number of blood vOTUs homologous to gut viruses. This recreates Figure S10B:
+
+```{r Gut origin abundance, message=FALSE, warning=FALSE}
+gut <- speedyseq::relocate_tax_table(blood, "Gut")
+gut_glom <- speedyseq::tax_glom(gut, "Gut")
+gut_ab_df <- as.data.frame(otu_table(gut_glom))
+rownames(gut_ab_df) <- c("Gut", "Non-Gut")
+gut_ab_melt <- melt(as.matrix(gut_ab_df))
+gut_ab_melt <- cbind(gut_ab_melt, Disease = c(rep("CD", 16), rep("Healthy", 22), rep("CD", 10)))
+gut_ab_df <- gut_ab_melt[gut_ab_melt$Var1 == "Gut",]
+
+ggplot(gut_ab_df, aes(x = "", y = value)) +
+  geom_boxplot(outlier.shape = NA, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Blood vOTUs homologous to gut viruses (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Number of blood vOTUs homologous to oral viruses. This recreates Figure 3D:
+
+```{r Oral origin, message=FALSE, warning=FALSE}
+oral_factor <- factor(tax_table(blood)[, "Oral"])
+oral_table  = apply(otu_table(blood), MARGIN = 2, function(x) {
+  tapply(x, INDEX = oral_factor, FUN = function(y) length(y[y != 0]), simplify = TRUE)
+})
+oral_number_df <- data.frame(Oral = oral_table["1",], NonOral = oral_table["0",], Percent = (oral_table["1",]/(oral_table["0",]+oral_table["1",]))*100, Disease = c(rep("CD", 8), rep("Healthy", 11), rep("CD", 5)))
+
+ggplot(oral_number_df, aes(x = "", y = Percent)) +
+  geom_boxplot(outlier.shape = NA, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Blood vOTUs homologous to oral viruses (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Number of blood vOTUs homologous to oral viruses. This recreates Figure S10C:
+
+```{r Oral origin abundance, message=FALSE, warning=FALSE}
+oral <- speedyseq::relocate_tax_table(blood, "Oral")
+oral_glom <- speedyseq::tax_glom(oral, "Oral")
+oral_ab_df <- as.data.frame(otu_table(oral_glom))
+rownames(oral_ab_df) <- c("Non-Oral", "Oral")
+oral_ab_melt <- melt(as.matrix(oral_ab_df))
+oral_ab_melt <- cbind(oral_ab_melt, "Disease" = c(rep("CD", 16), rep("Healthy", 22), rep("CD", 10)))
+oral_ab_df <- oral_ab_melt[oral_ab_melt$Var1 == "Oral",]
+
+ggplot(oral_ab_df, aes(x = "", y = value)) +
+  geom_boxplot(outlier.shape = NA, color = "indianred") +
+  geom_jitter(width = 0.1, size = 3, color = "indianred") +
+  labs(x = "", y = "Blood vOTUs homologous to oral viruses (%)", title = "") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+# Differential analysis
+
+Differential analysis for fecal samples:
+
+```{r DA feces, message=FALSE, warning=FALSE}
+metadata = sample_mat
+feces_df = data.frame(t(otu_table(feces)))
+
+fit_feces = Maaslin2(input_data = feces_df, 
+                     input_metadata = metadata,
+                     min_prevalence = 0.18,
+                     min_abundance  = 0.0,
+                     normalization  = "TSS",
+                     output         = "fit_feces", 
+                     fixed_effects  = c("Disease", "Sex"),
+                     reference      = c("Disease,Healthy", "Sex,Male"))
+
+fit_feces$results[fit_feces$results$qval < 0.25,]
+```
+
+Differential analysis for blood samples. This recreates Figure 5:
+
+```{r DA blood, message=FALSE, warning=FALSE}
+blood_df = data.frame(t(otu_table(blood)))
+
+fit_blood = Maaslin2(input_data = blood_df,
+                     input_metadata = metadata,
+                     min_prevalence = 0.2,
+                     min_abundance  = 0.0,
+                     normalization  = "TSS",
+                     output         = "fit_blood",
+                     fixed_effects  = c("Disease", "Sex"),
+                     reference      = c("Disease,Healthy", "Sex,Male"))
+
+da_df <- fit_blood$results[fit_blood$results$qval < 0.25 & fit_blood$results$metadata == "Disease" & abs(fit_blood$results$coef) > 1,]
+
+ggplot(da_df, aes(x = reorder(feature, -coef), y = coef, fill = pval)) +
+  geom_bar(stat = "identity") +
+  labs(x = "vOTUs", y = "Log2FC", fill = "p-value") +
+  scale_fill_gradient(low = "#d73027", high = "#fee0d2") +
+  scale_y_continuous(breaks = seq(-3, 3, by = 1), limits = c(-3.5, 3.5)) +
+  coord_flip() +
+  theme_linedraw() +
+  annotate(xmin = c(-Inf, 2.5, 3.5, 4.5, 5.5, 7.5, 9.5, 10.5, 13.5, 14.5, 17.5, 19.5, 21.5, 23.5, 24.5, 25.5, 26.5), 
+           xmax = c(2.5, 3.5, 4.5, 5.5, 7.5, 9.5, 10.5, 13.5, 14.5, 17.5, 19.5, 21.5, 23.5, 24.5, 25.5, 26.5, Inf),
+           ymin = -Inf, 
+           ymax = -3.5,
+           geom = "rect",
+           fill = c("grey", "#008080", "#40E0D0", "grey", "#4169E1", "grey", "#808000", "grey", "#4169E1", "grey", "#4169E1", "grey", "#4169E1", "grey", "#228B22", "#87CEEB", "#001F3F"),
+           alpha = 0.75) +
+    theme(legend.title = element_text(size = 20), legend.text = element_text(size = 10), axis.text.y = element_text(size = 7))
+```
+
+
+
