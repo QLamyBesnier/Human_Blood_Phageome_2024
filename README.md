@@ -18,7 +18,7 @@ The 3 files are required to the reproduce the analysis presented in the manuscri
 
 ### Code
 
-The code for corresponding to the data analysis can be found in the "Code" folder.
+The code corresponding to the data analysis can be found in the "Code" folder.
 
 It is composed of a single RMarkdown file which generates all the figures corresponding to the manuscript.
 
